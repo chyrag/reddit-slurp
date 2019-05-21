@@ -37,7 +37,7 @@ def subst_title(title):
     return title.replace(' ', '_').replace('/', '_')
 
 
-def __download_data(url, created, title, ctype):
+def __download_data(url, author, created, title, ctype):
     """ Download the data from the URL """
     created = datetime.datetime.fromtimestamp(created)
     try:
@@ -45,7 +45,8 @@ def __download_data(url, created, title, ctype):
     except KeyError:
         ext = '.dat'
     title = title.strip('.! ')
-    target = created.isoformat() + '_' + subst_title(title) + ext
+    target = '{}_{}_{}{}'.format(created.isoformat(), author,
+                                 subst_title(title), ext)
     if os.path.exists(target):
         return '[A]'
     try:
@@ -83,10 +84,12 @@ def check_link(post):
     """ Check the link for embedded stuff """
     if 'https://imgur.com' in post.url:
         url = post.url.replace('https://', 'https://i.') + '.jpg'
-        return __download_data(url, post.created, post.title, 'image/jpeg')
+        return __download_data(url, post.author, post.created, post.title,
+                               'image/jpeg')
     elif 'https://gfycat.com' in post.url:
         url = find_mp4_link(post.url)
-        return __download_data(url, post.created, post.title, 'video/webm')
+        return __download_data(url, post.author, post.created, post.title,
+                               'video/webm')
     else:
         return '[U parse HTML from {}]'.format(post.url)
 
@@ -116,8 +119,8 @@ def process(post):
         return
     status = 'Unknown Error'
     if 'image' in content_type:
-        status = __download_data(post.url, post.created, post.title,
-                                 content_type)
+        status = __download_data(post.url, post.author, post.created,
+                                 post.title, content_type)
     elif 'text' in content_type:
         status = check_link(post)
     else:
@@ -222,6 +225,7 @@ def main():
         traceback.format_tb(traceback_)
         raise
         sys.exit(1)
+
 
 if __name__ == '__main__':
     sys.exit(main())
