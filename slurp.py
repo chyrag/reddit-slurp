@@ -16,7 +16,7 @@ from docopt import docopt
 from bs4 import BeautifulSoup
 
 USER_AGENT = 'my awesome reddit app'
-DEFAULT_LIMIT = 100
+DEFAULT_LIMIT = 1000
 SUPPORTED_PLATFORMS = ['posix', 'nt']
 CONFIG = 'slurp.json'
 
@@ -37,31 +37,39 @@ def subst_title(title):
     return title.replace(' ', '_').replace('/', '_')
 
 
-def __download_data(url, author, created, title, ctype):
-    """ Download the data from the URL """
+def __download_data(url, author, created, title):
+    """ Download the data from the URL and save it locally """
+    try:
+        response = requests.head(url)
+        ctype = response.headers['Content-Type']
+    except Exception as error:
+        return '[E {} {}]'.format(url, response.status_code)
     created = datetime.datetime.fromtimestamp(created)
     try:
         ext = KNOWN_CONTENT_TYPES[ctype]
     except KeyError:
-        ext = '.dat'
+        print('Unknown content type: {}'.format(ctype))
+        sys.exit(1)
+
     title = title.strip('.! ')
     target = '{}_{}_{}{}'.format(created.isoformat(), author,
                                  subst_title(title), ext)
     if os.path.exists(target):
         return '[A]'
+    clength = 0
     try:
         response = requests.get(url)
         if response:
-            clength = 0
             with open(target, 'wb') as fp:
                 for chunk in response:
                     clength += fp.write(chunk)
                 fp.close()
             return '[D {}]'.format(clength)
         else:
-            return '[E {} {}]'.format(url, response.status_code)
+            return '[E {}: {}]'.format(url, response.status_code)
     except Exception as error:
-        print('{}: {}'.format(type(error), error))
+        return '[E {}]'.format(error)
+    return '[D {}]'.format(clength)
 
 
 def find_mp4_link(url):
@@ -73,25 +81,53 @@ def find_mp4_link(url):
         for tag in soup.findAll('main', class_='component-container'):
             for src in tag.findAll('source'):
                 available.update({src.get('type'): src.get('src')})
-        if available:
-            for pref in VIDEO_PREFERENCES:
-                if pref in available:
-                    return available[pref]
-        return url.replace('https://', 'https://giant.')
+            if available:
+                for pref in VIDEO_PREFERENCES:
+                    if pref in available:
+                        return available[pref]
+            return url.replace('https://', 'https://giant.')
+        for tag in soup.findAll('meta', property='og:video'):
+            return tag['content']
+    else:
+        print('NO MP4 LINK FOUND in {}'.formta(url))
+
+    return None
 
 
-def check_link(post):
+def find_redv_link(url):
+    response = requests.get(url, headers=HEADERS)
+    if response:
+        vid = response.text.encode(response.encoding)
+        title = url.rstrip('/').split('/')[-1]
+        print('FIXME Writing redv page to /tmp/{}; check that for redv link'.
+              format(title))
+        with open('/tmp/{}'.format(title), 'wb') as data:
+            data.write(vid)
+            data.close()
+
+
+def find_vid_link(post):
     """ Check the link for embedded stuff """
     if 'https://imgur.com' in post.url:
         url = post.url.replace('https://', 'https://i.') + '.jpg'
-        return __download_data(url, post.author, post.created, post.title,
-                               'image/jpeg')
-    elif 'https://gfycat.com' in post.url:
+        return __download_data(url, post.author, post.created, post.title)
+
+    if 'https://gfycat.com' in post.url or post.url.endswith('.gifv'):
         url = find_mp4_link(post.url)
-        return __download_data(url, post.author, post.created, post.title,
-                               'video/webm')
-    else:
-        return '[U parse HTML from {}]'.format(post.url)
+        return __download_data(url, post.author, post.created, post.title)
+    if 'https://redv.co' in post.url:
+        print('(redirected to {})'.format(post.url))
+        return find_redv_link(post.url)
+    # U parse HTML from https://i.imgur.com/FJOtGDE.gifv
+
+    print('Failed to parse HTML at {}'.format(post.url))
+    try:
+        url = post.media['reddit_video']['fallback_url']
+        return __download_data(url, post.author, post.created, post.title)
+    except TypeError as error:
+        print('Could not download video in {}: {}'.format(post.url, error))
+        return False
+    return '[U parse HTML from {}]'.format(post.url)
 
 
 def process(post):
@@ -102,30 +138,47 @@ def process(post):
     except Exception:
         host = urllib.parse.urlparse(post.url).netloc
         print('[E connection error for {}]'.format(host))
-        return
+        return False
     if not response:
+        """
+        This works as well, but has frames
+        put /embed?pub=true&ref=&w=540 at the end of the url
+        eg https://imgur.com/a/aG1SIgf/embed?pub=true&ref=&w=540
+        """
+        if 'imgur.com' in post.url and response.status_code == 429:
+            url = post.url + '.jpg'
+            status = __download_data(url, post.author, post.created,
+                                     post.title)
+            print(status)
+            return True
+        if response.status_code == 502:
+            try:
+                url = post.media['reddit_video']['fallback_url']
+                status = __download_data(url, post.author, post.created,
+                                         post.title)
+                print(status)
+                return True
+            except TypeError:
+                print('No video found on {}'.format(post.url))
+                return False
         print('[E {} {}]'.format(post.url, response.status_code))
-        return
+        return False
     if 'Location' in response.headers:
         post.url = urllib.parse.urljoin(post.url, response.headers['location'])
         return process(post)
-    if 'Content-Type' not in response.headers:
-        print('[E missing content type in {}]'.format(post.url))
-        return
-    ctype = response.headers['Content-Type']
-    content_type = ctype.replace(' ', '').lower()
-    if content_type not in KNOWN_CONTENT_TYPES:
-        print('[E Unknown content-type {}]'.format(ctype))
-        return
-    status = 'Unknown Error'
-    if 'image' in content_type:
+
+    if 'text' in response.headers['Content-Type']:
+        status = find_vid_link(post)
+        print(status)
+    elif 'video/mp4' in response.headers[
+            'Content-Type'] or 'image' in response.headers['Content-Type']:
         status = __download_data(post.url, post.author, post.created,
-                                 post.title, content_type)
-    elif 'text' in content_type:
-        status = check_link(post)
+                                 post.title)
+        print(status)
     else:
-        print('[U {}]'.format(ctype))
-    print(status)
+        print('Error processing {}'.format(post.url))
+
+    return True
 
 
 def config_path():
@@ -189,10 +242,9 @@ def main():
 
     limit = int(limit)
     try:
-        reddit = praw.Reddit(
-            client_id=data['client-id'],
-            client_secret=data['client-secret'],
-            user_agent=USER_AGENT)
+        reddit = praw.Reddit(client_id=data['client-id'],
+                             client_secret=data['client-secret'],
+                             user_agent=USER_AGENT)
         os.umask(0o22)
         cwd = os.getcwd()
 
@@ -224,8 +276,8 @@ def main():
         type_, value_, traceback_ = sys.exc_info()
         traceback.format_tb(traceback_)
         raise
-        sys.exit(1)
 
 
 if __name__ == '__main__':
+
     sys.exit(main())
