@@ -273,7 +273,7 @@ def main():
         os.chdir(cwd)
     except Exception as error:
         print('{}: {}'.format(type(error), error))
-        type_, value_, traceback_ = sys.exc_info()
+        _, _, traceback_ = sys.exc_info()
         traceback.format_tb(traceback_)
         raise
 
