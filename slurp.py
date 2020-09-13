@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Usage: slurp [--hot] [--channel=<channel>] [--user=<user>] [--limit=<limit>]
+Usage: slurp [--verbose|--debug] [--hot] [--channel=<channel>] [--user=<user>] [--limit=<limit>]
        slurp configure --client-id=<client_id> --client-secret=<client_secret
 """
 
@@ -12,6 +12,8 @@ import requests
 import datetime
 import traceback
 import urllib
+import urllib3
+import logging
 from docopt import docopt
 from bs4 import BeautifulSoup
 
@@ -37,39 +39,37 @@ def subst_title(title):
     return title.replace(' ', '_').replace('/', '_')
 
 
-def __download_data(url, author, created, title):
+def _download_media(_post, _ctype):
     """ Download the data from the URL and save it locally """
+    created = datetime.datetime.fromtimestamp(_post.created)
     try:
-        response = requests.head(url)
-        ctype = response.headers['Content-Type']
-    except Exception as error:
-        return '[E {} {}]'.format(url, response.status_code)
-    created = datetime.datetime.fromtimestamp(created)
-    try:
-        ext = KNOWN_CONTENT_TYPES[ctype]
+        ext = KNOWN_CONTENT_TYPES[_ctype]
     except KeyError:
-        print('Unknown content type: {}'.format(ctype))
+        print('Unknown content type: {}'.format(_ctype))
         sys.exit(1)
 
-    title = title.strip('.! ')
-    target = '{}_{}_{}{}'.format(created.isoformat(), author,
+    title = _post.title.strip('.! ')
+    target = '{}_{}_{}{}'.format(created.isoformat(), _post.author,
                                  subst_title(title), ext)
     if os.path.exists(target):
-        return '[A]'
+        logging.info('%s [A]', _post.title)
+        return True
+
     clength = 0
     try:
-        response = requests.get(url)
+        response = requests.get(_post.url)
         if response:
             with open(target, 'wb') as fp:
                 for chunk in response:
                     clength += fp.write(chunk)
                 fp.close()
-            return '[D {}]'.format(clength)
-        else:
-            return '[E {}: {}]'.format(url, response.status_code)
-    except Exception as error:
-        return '[E {}]'.format(error)
-    return '[D {}]'.format(clength)
+            logging.info('%s [D %d]', _post.title, clength)
+            return True
+        logging.error('%s [E %d]', _post.url, response.status_code)
+    except (requests.ConnectionError, urllib3.exceptions.ProtocolError,
+            requests.exceptions.ChunkedEncodingError) as error:
+        logging.error('%s [%s]', _post.url, error)
+    return False
 
 
 def find_mp4_link(url):
@@ -90,12 +90,11 @@ def find_mp4_link(url):
             return tag['content']
     else:
         print('NO MP4 LINK FOUND in {}'.formta(url))
-
     return None
 
 
 def find_redv_link(url):
-    response = requests.get(url, headers=HEADERS)
+    response = requests.get(url)
     if response:
         vid = response.text.encode(response.encoding)
         title = url.rstrip('/').split('/')[-1]
@@ -106,79 +105,68 @@ def find_redv_link(url):
             data.close()
 
 
-def find_vid_link(post):
-    """ Check the link for embedded stuff """
+def find_media_link(post):
+    """ Search the post for known embedded links """
     if 'https://imgur.com' in post.url:
-        url = post.url.replace('https://', 'https://i.') + '.jpg'
-        return __download_data(url, post.author, post.created, post.title)
+        logging.debug('imgur URL')
+        return post.url.replace('https://', 'https://i.') + '.jpg'
 
     if 'https://gfycat.com' in post.url or post.url.endswith('.gifv'):
-        url = find_mp4_link(post.url)
-        return __download_data(url, post.author, post.created, post.title)
-    if 'https://redv.co' in post.url:
-        print('(redirected to {})'.format(post.url))
-        return find_redv_link(post.url)
-    # U parse HTML from https://i.imgur.com/FJOtGDE.gifv
+        logging.debug('gfycat URL')
+        return find_mp4_link(post.url)
 
-    print('Failed to parse HTML at {}'.format(post.url))
+    if 'https://redv.co' in post.url:
+        logging.debug('redv.co URL')
+        return find_redv_link(post.url)
+
+    if 'https://www.redgifs.com' in post.url:
+        logging.debug('redgifs URL')
+        return find_mp4_link(post.url)
+
     try:
-        url = post.media['reddit_video']['fallback_url']
-        return __download_data(url, post.author, post.created, post.title)
-    except TypeError as error:
-        print('Could not download video in {}: {}'.format(post.url, error))
-        return False
-    return '[U parse HTML from {}]'.format(post.url)
+        return post.media['reddit_video']['fallback_url']
+    except (TypeError, KeyError) as error:
+        logging.error('No reddit_video link: %s', error)
+    return None
+
+
+def error_handler(post, response):
+    """ Error handler """
+    logging.error('Status %s %s', response.status_code, post.url)
+    return False
 
 
 def process(post):
     """ Process the given submission """
-    print(post.title, ': ', end='')
+    # Check URL by requesting HEAD
     try:
         response = requests.head(post.url)
-    except Exception:
+    except requests.ConnectionError as error:
         host = urllib.parse.urlparse(post.url).netloc
-        print('[E connection error for {}]'.format(host))
+        logging.error('[E connection error for %s: %s]', host, error)
         return False
+
+    # Getting HEAD failed
     if not response:
-        """
-        This works as well, but has frames
-        put /embed?pub=true&ref=&w=540 at the end of the url
-        eg https://imgur.com/a/aG1SIgf/embed?pub=true&ref=&w=540
-        """
-        if 'imgur.com' in post.url and response.status_code == 429:
-            url = post.url + '.jpg'
-            status = __download_data(url, post.author, post.created,
-                                     post.title)
-            print(status)
-            return True
-        if response.status_code == 502:
-            try:
-                url = post.media['reddit_video']['fallback_url']
-                status = __download_data(url, post.author, post.created,
-                                         post.title)
-                print(status)
-                return True
-            except TypeError:
-                print('No video found on {}'.format(post.url))
-                return False
-        print('[E {} {}]'.format(post.url, response.status_code))
-        return False
+        return error_handler(post, response)
+
+    # Handle redirect
     if 'Location' in response.headers:
         post.url = urllib.parse.urljoin(post.url, response.headers['location'])
         return process(post)
 
+    # If we get text/html, then look for links within the HTML document
     if 'text' in response.headers['Content-Type']:
-        status = find_vid_link(post)
-        print(status)
-    elif 'video/mp4' in response.headers[
-            'Content-Type'] or 'image' in response.headers['Content-Type']:
-        status = __download_data(post.url, post.author, post.created,
-                                 post.title)
-        print(status)
-    else:
-        print('Error processing {}'.format(post.url))
+        post.url = find_media_link(post)
+        return process(post)
 
-    return True
+    # If we get non-text/html, then download it
+    ctype = response.headers['Content-Type']
+    if 'video/' in ctype or 'image/' in ctype:
+        return _download_media(post, ctype)
+
+    logging.error('Error handling %s', post.url)
+    return False
 
 
 def config_path():
@@ -216,68 +204,72 @@ def configure_reddit(args):
     return 0
 
 
+def download_posts(_chan, _store, _limit, _hot):
+    """ Download post data from the given store """
+    try:
+        os.mkdir(_store)
+    except FileExistsError:
+        pass
+    os.chdir(_store)
+
+    posts = _chan.hot(limit=_limit) if _hot else _chan.new(limit=_limit)
+    for post in posts:
+        tags = vars(post)
+        if 'url' in tags:
+            if not process(post):
+                logging.error('Error retrieving %s', post.url)
+
+
 def main():
     args = docopt(__doc__)
     limit = args['--limit'] if args['--limit'] else DEFAULT_LIMIT
     channel = args['--channel'] if args['--channel'] else None
     user = args['--user'] if args['--user'] else None
     configure = args['configure']
+    log_level = logging.ERROR
+    if args['--debug']:
+        log_level = logging.DEBUG
+    if args['--verbose']:
+        log_level = logging.INFO
+    logging.basicConfig(level=log_level, format='%(levelname)s %(message)s')
 
     if configure:
-        sys.exit(configure_reddit(args))
+        return configure_reddit(args)
 
     try:
         with open(config_path()) as config:
             data = json.loads(''.join(config.readlines()))
             config.close()
-    except Exception as error:
-        print(error)
+    except OSError:
         print('Please configure reddit-slurp before using.')
-        sys.exit(1)
+        return 1
 
-    if not channel and not user:
-        print(__doc__.strip())
-        print('Need a channel or reddit user name to slurp media from.')
-        sys.exit(0)
-
-    limit = int(limit)
     try:
-        reddit = praw.Reddit(client_id=data['client-id'],
-                             client_secret=data['client-secret'],
-                             user_agent=USER_AGENT)
-        os.umask(0o22)
-        cwd = os.getcwd()
+        if not channel and not user:
+            print(__doc__.strip())
+            print('Need a channel or reddit user name to slurp media from.')
+            return 0
 
-        if channel:
-            chan = reddit.subreddit(channel)
-            store = channel
-        elif user:
-            chan = reddit.redditor(user).submissions
-            store = user
-
+        limit = int(limit)
         try:
-            os.mkdir(store)
-        except FileExistsError:
-            pass
-        os.chdir(store)
-
-        posts = chan.hot(limit=limit) if args['--hot'] else chan.new(
-            limit=limit)
-        for post in posts:
-            tags = vars(post)
-            if 'url' in tags:
-                try:
-                    process(post)
-                except KeyboardInterrupt:
-                    sys.exit(1)
-        os.chdir(cwd)
-    except Exception as error:
-        print('{}: {}'.format(type(error), error))
-        _, _, traceback_ = sys.exc_info()
-        traceback.format_tb(traceback_)
-        raise
-
-
-if __name__ == '__main__':
-
-    sys.exit(main())
+            reddit = praw.Reddit(client_id=data['client-id'],
+                                 client_secret=data['client-secret'],
+                                 user_agent=USER_AGENT)
+            os.umask(0o22)
+            cwd = os.getcwd()
+            if channel:
+                chan = reddit.subreddit(channel)
+                store = channel
+            elif user:
+                chan = reddit.redditor(user).submissions
+                store = user
+            download_posts(chan, store, limit, args['--hot'])
+            os.chdir(cwd)
+        except Exception as error:
+            print('{}: {}'.format(type(error), error))
+            _, _, traceback_ = sys.exc_info()
+            traceback.format_tb(traceback_)
+            raise
+        return 0
+    except KeyboardInterrupt:
+        pass
