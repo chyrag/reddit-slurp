@@ -7,6 +7,8 @@ Usage: slurp [--verbose|--debug] [--hot] [--channel=<channel>] [--user=<user>] [
 import sys
 import os
 import json
+import random
+import time
 import praw
 import prawcore
 import requests
@@ -42,6 +44,11 @@ def subst_title(title):
     return title.replace(' ', '_').replace('/', '_')
 
 
+def _request(method, url):
+    """ Call a requests method with the shared timeout and User-Agent """
+    return method(url, timeout=DEFAULT_TIMEOUT, headers={'User-Agent': USER_AGENT})
+
+
 def _download_media(_post, _ctype):
     """ Download the data from the URL and save it locally """
     created = datetime.datetime.fromtimestamp(_post.created)
@@ -63,8 +70,7 @@ def _download_media(_post, _ctype):
 
     clength = 0
     try:
-        response = requests.get(_post.url, timeout=DEFAULT_TIMEOUT,
-                                headers={'User-Agent': USER_AGENT})
+        response = _request(requests.get, _post.url)
         if response:
             with open(target, 'wb') as fp:
                 for chunk in response:
@@ -105,8 +111,7 @@ def save_failed_page(post):
     failed_dir = '_failed'
     try:
         os.makedirs(failed_dir, exist_ok=True)
-        response = requests.get(post.url, timeout=DEFAULT_TIMEOUT,
-                                headers={'User-Agent': USER_AGENT})
+        response = _request(requests.get, post.url)
         target = os.path.join(failed_dir, '{}.html'.format(post.id))
         with open(target, 'wb') as fp:
             fp.write(response.content)
@@ -126,8 +131,7 @@ def process(post):
         logging.debug('Missing URL.')
         return False
     try:
-        response = requests.head(post.url, timeout=DEFAULT_TIMEOUT,
-                                 headers={'User-Agent': USER_AGENT})
+        response = _request(requests.head, post.url)
     except (requests.ConnectionError,
             requests.exceptions.MissingSchema,
             requests.exceptions.ReadTimeout) as error:
@@ -220,6 +224,7 @@ def download_posts(_chan, _store, _limit, _hot):
             if 'url' in tags:
                 if not process(post):
                     logging.error('Error retrieving %s', post.url)
+            time.sleep(random.uniform(1, 2))
     except prawcore.exceptions.NotFound as error:
         logging.error(error)
 
