@@ -12,4 +12,5 @@ test:
 	uv run pytest
 
 clean:
-	rm -rf .pytest_cache dist build *.egg-info __pycache__ tests/__pycache__
+	rm -rf .pytest_cache dist build *.egg-info
+	find . -name __pycache__ -not -path './.venv/*' -exec rm -rf {} +

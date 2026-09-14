@@ -16,7 +16,8 @@ import urllib.parse
 import urllib3
 import logging
 from docopt import docopt
-from bs4 import BeautifulSoup
+
+import providers
 
 USER_AGENT = 'my awesome reddit app'
 DEFAULT_LIMIT = 100
@@ -34,7 +35,6 @@ KNOWN_CONTENT_TYPES = {
     'text/html;charset=utf-8': '.html',
     'text/plain;charset=utf-8': '.txt',
 }
-VIDEO_PREFERENCES = ['video/webm', 'video/mp4']
 
 
 def subst_title(title):
@@ -80,57 +80,11 @@ def _download_media(_post, _ctype):
     return False
 
 
-def find_mp4_link(url):
-    """ Find the video link in the webpage pointed to by the url """
-    response = requests.get(url, timeout=DEFAULT_TIMEOUT)
-    if response:
-        soup = BeautifulSoup(response.text, 'html.parser')
-        available = {}
-        for tag in soup.findAll('main', class_='component-container'):
-            for src in tag.findAll('source'):
-                available.update({src.get('type'): src.get('src')})
-            if available:
-                for pref in VIDEO_PREFERENCES:
-                    if pref in available:
-                        return available[pref]
-            return url.replace('https://', 'https://giant.')
-        for tag in soup.findAll('meta', property='og:video'):
-            return tag['content']
-        for tag in soup.findAll('source', type_='video/mp4'):
-            return tag['src']
-    else:
-        print('NO MP4 LINK FOUND in {}'.format(url))
-    return None
-
-
-def find_redv_link(url):
-    response = requests.get(url, timeout=DEFAULT_TIMEOUT)
-    if response:
-        vid = response.text.encode(response.encoding)
-        title = url.rstrip('/').split('/')[-1]
-        print('FIXME Writing redv page to /tmp/{}; check that for redv link'.
-              format(title))
-        with open('/tmp/{}'.format(title), 'wb') as data:
-            data.write(vid)
-
-
 def find_media_link(post):
     """ Search the post for known embedded links """
-    if 'https://imgur.com' in post.url:
-        return find_mp4_link(post.url)
-        # return post.url.replace('https://', 'https://i.') + '.jpg'
-
-    if 'https://gfycat.com' in post.url or post.url.endswith('.gifv'):
-        logging.debug('gfycat URL')
-        return find_mp4_link(post.url)
-
-    if 'https://redv.co' in post.url:
-        logging.debug('redv.co URL')
-        return find_redv_link(post.url)
-
-    if 'https://www.redgifs.com' in post.url:
-        logging.debug('redgifs URL')
-        return find_mp4_link(post.url)
+    for provider in providers.REGISTRY:
+        if provider.matches(post.url):
+            return provider.resolve(post.url)
 
     try:
         return post.media['reddit_video']['fallback_url']

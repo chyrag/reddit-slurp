@@ -1,6 +1,7 @@
 import docopt
 
 import slurp
+from providers import gfycat
 
 
 def test_subst_title():
@@ -29,3 +30,23 @@ def test_configure_reddit_writes_config(monkeypatch, tmp_path):
 
     config = tmp_path / '.config' / 'slurp.json'
     assert config.exists()
+
+
+class _FakePost:
+    def __init__(self, url, media=None):
+        self.url = url
+        self.media = media
+
+
+def test_find_media_link_dispatches_to_matching_provider(monkeypatch):
+    monkeypatch.setattr(gfycat, 'resolve', lambda url: 'resolved-url')
+    post = _FakePost('https://gfycat.com/something')
+    assert slurp.find_media_link(post) == 'resolved-url'
+
+
+def test_find_media_link_falls_back_to_reddit_video():
+    post = _FakePost(
+        'https://example.com/no-match',
+        media={'reddit_video': {'fallback_url': 'https://v.redd.it/abc'}},
+    )
+    assert slurp.find_media_link(post) == 'https://v.redd.it/abc'
