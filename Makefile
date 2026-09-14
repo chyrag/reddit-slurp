@@ -1,10 +1,15 @@
-all: install
+.PHONY: all setup run test clean
 
-install:
-	pip3 install -e .
+all: setup
 
-uninstall:
-	pip3 uninstall -y reddit-slurp
+setup:
+	uv sync
+
+run:
+	uv run slurp $(ARGS)
+
+test:
+	uv run pytest
 
 clean:
-	rm -rf reddit_slurp.egg-info __pycache__
+	rm -rf .pytest_cache dist build *.egg-info __pycache__ tests/__pycache__

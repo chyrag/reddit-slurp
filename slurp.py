@@ -1,26 +1,29 @@
 #!/usr/bin/env python3
 """
 Usage: slurp [--verbose|--debug] [--hot] [--channel=<channel>] [--user=<user>] [--limit=<limit>]
-       slurp configure --client-id=<client_id> --client-secret=<client_secret
+       slurp configure --client-id=<client_id> --client-secret=<client_secret>
 """
 
 import sys
 import os
 import json
 import praw
+import prawcore
 import requests
 import datetime
 import traceback
-import urllib
+import urllib.parse
 import urllib3
 import logging
 from docopt import docopt
 from bs4 import BeautifulSoup
 
 USER_AGENT = 'my awesome reddit app'
-DEFAULT_LIMIT = 1000
+DEFAULT_LIMIT = 100
 SUPPORTED_PLATFORMS = ['posix', 'nt']
 CONFIG = 'slurp.json'
+DEFAULT_TIMEOUT = 10
+MAX_FILENAME_LENGTH = 250
 
 KNOWN_CONTENT_TYPES = {
     'image/jpeg': '.jpg',
@@ -45,36 +48,41 @@ def _download_media(_post, _ctype):
     try:
         ext = KNOWN_CONTENT_TYPES[_ctype]
     except KeyError:
-        print('Unknown content type: {}'.format(_ctype))
-        sys.exit(1)
+        logging.error('Unknown content type: %s', _ctype)
+        return False
 
     title = _post.title.strip('.! ')
     target = '{}_{}_{}{}'.format(created.isoformat(), _post.author,
                                  subst_title(title), ext)
+
+    if len(target) > MAX_FILENAME_LENGTH:
+        target = target[:MAX_FILENAME_LENGTH]
     if os.path.exists(target):
         logging.info('%s [A]', _post.title)
         return True
 
     clength = 0
     try:
-        response = requests.get(_post.url)
+        response = requests.get(_post.url, timeout=DEFAULT_TIMEOUT)
         if response:
             with open(target, 'wb') as fp:
                 for chunk in response:
                     clength += fp.write(chunk)
-                fp.close()
             logging.info('%s [D %d]', _post.title, clength)
             return True
         logging.error('%s [E %d]', _post.url, response.status_code)
     except (requests.ConnectionError, urllib3.exceptions.ProtocolError,
             requests.exceptions.ChunkedEncodingError) as error:
         logging.error('%s [%s]', _post.url, error)
+    except OSError as error:
+        if error.errno == 36:
+            logging.error('Filename too long (%d): %s', len(target), target)
     return False
 
 
 def find_mp4_link(url):
     """ Find the video link in the webpage pointed to by the url """
-    response = requests.get(url)
+    response = requests.get(url, timeout=DEFAULT_TIMEOUT)
     if response:
         soup = BeautifulSoup(response.text, 'html.parser')
         available = {}
@@ -88,13 +96,15 @@ def find_mp4_link(url):
             return url.replace('https://', 'https://giant.')
         for tag in soup.findAll('meta', property='og:video'):
             return tag['content']
+        for tag in soup.findAll('source', type_='video/mp4'):
+            return tag['src']
     else:
-        print('NO MP4 LINK FOUND in {}'.formta(url))
+        print('NO MP4 LINK FOUND in {}'.format(url))
     return None
 
 
 def find_redv_link(url):
-    response = requests.get(url)
+    response = requests.get(url, timeout=DEFAULT_TIMEOUT)
     if response:
         vid = response.text.encode(response.encoding)
         title = url.rstrip('/').split('/')[-1]
@@ -102,14 +112,13 @@ def find_redv_link(url):
               format(title))
         with open('/tmp/{}'.format(title), 'wb') as data:
             data.write(vid)
-            data.close()
 
 
 def find_media_link(post):
     """ Search the post for known embedded links """
     if 'https://imgur.com' in post.url:
-        logging.debug('imgur URL')
-        return post.url.replace('https://', 'https://i.') + '.jpg'
+        return find_mp4_link(post.url)
+        # return post.url.replace('https://', 'https://i.') + '.jpg'
 
     if 'https://gfycat.com' in post.url or post.url.endswith('.gifv'):
         logging.debug('gfycat URL')
@@ -139,26 +148,37 @@ def error_handler(post, response):
 def process(post):
     """ Process the given submission """
     # Check URL by requesting HEAD
+    if not post.url:
+        logging.debug('Missing URL.')
+        return False
     try:
-        response = requests.head(post.url)
-    except requests.ConnectionError as error:
-        host = urllib.parse.urlparse(post.url).netloc
-        logging.error('[E connection error for %s: %s]', host, error)
+        response = requests.head(post.url, timeout=DEFAULT_TIMEOUT)
+    except (requests.ConnectionError,
+            requests.exceptions.MissingSchema,
+            requests.exceptions.ReadTimeout) as error:
+        logging.error('%s: %s', type(error).__name__, post.url)
         return False
 
     # Getting HEAD failed
     if not response:
         return error_handler(post, response)
 
-    # Handle redirect
+    # Handle redirect (doesn't handle cyclic redirects)
     if 'Location' in response.headers:
-        post.url = urllib.parse.urljoin(post.url, response.headers['location'])
-        return process(post)
+        _url = urllib.parse.urljoin(post.url, response.headers['location'])
+        logging.debug('[%s redirected to %s]', post.url, _url)
+        if _url != post.url:
+            post.url = _url
+            return process(post)
 
     # If we get text/html, then look for links within the HTML document
     if 'text' in response.headers['Content-Type']:
-        post.url = find_media_link(post)
-        return process(post)
+        _url = find_media_link(post)
+        logging.debug('[received %s; sifting through got %s]',
+                      response.headers['Content-Type'], _url)
+        if _url != post.url:
+            post.url = _url
+            return process(post)
 
     # If we get non-text/html, then download it
     ctype = response.headers['Content-Type']
@@ -183,7 +203,7 @@ def config_path():
 def configure_reddit(args):
     """ Configure reddit access """
     if os.name not in SUPPORTED_PLATFORMS:
-        print('{} is not supported.')
+        print('{} is not supported.'.format(os.name))
         return 1
     config = config_path()
     cdir = os.path.dirname(config)
@@ -193,14 +213,12 @@ def configure_reddit(args):
         except OSError as error:
             print(error)
             return 1
-    else:
-        data = {
-            'client-id': args['--client-id'],
-            'client-secret': args['--client-secret']
-        }
-        with open(config, 'w') as fp:
-            fp.write(json.dumps(data, indent=4))
-            fp.close()
+    data = {
+        'client-id': args['--client-id'],
+        'client-secret': args['--client-secret']
+    }
+    with open(config, 'w') as fp:
+        fp.write(json.dumps(data, indent=4))
     return 0
 
 
@@ -212,12 +230,15 @@ def download_posts(_chan, _store, _limit, _hot):
         pass
     os.chdir(_store)
 
-    posts = _chan.hot(limit=_limit) if _hot else _chan.new(limit=_limit)
-    for post in posts:
-        tags = vars(post)
-        if 'url' in tags:
-            if not process(post):
-                logging.error('Error retrieving %s', post.url)
+    try:
+        posts = _chan.hot(limit=_limit) if _hot else _chan.new(limit=_limit)
+        for post in posts:
+            tags = vars(post)
+            if 'url' in tags:
+                if not process(post):
+                    logging.error('Error retrieving %s', post.url)
+    except prawcore.exceptions.NotFound as error:
+        logging.error(error)
 
 
 def main():
@@ -238,8 +259,7 @@ def main():
 
     try:
         with open(config_path()) as config:
-            data = json.loads(''.join(config.readlines()))
-            config.close()
+            data = json.load(config)
     except OSError:
         print('Please configure reddit-slurp before using.')
         return 1
