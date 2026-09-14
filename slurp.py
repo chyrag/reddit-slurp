@@ -110,6 +110,8 @@ def save_failed_page(post):
         target = os.path.join(failed_dir, '{}.html'.format(post.id))
         with open(target, 'wb') as fp:
             fp.write(response.content)
+        if not response.ok:
+            logging.error('Saved page was a %s response', response.status_code)
         return target
     except (requests.ConnectionError, requests.exceptions.ReadTimeout,
             OSError) as error:

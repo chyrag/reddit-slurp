@@ -53,8 +53,9 @@ def test_find_media_link_falls_back_to_reddit_video():
 
 
 class _FakeResponse:
-    def __init__(self, content):
+    def __init__(self, content, ok=True):
         self.content = content
+        self.ok = ok
 
 
 def test_save_failed_page_writes_html(monkeypatch, tmp_path):
