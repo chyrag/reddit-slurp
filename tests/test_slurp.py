@@ -50,3 +50,24 @@ def test_find_media_link_falls_back_to_reddit_video():
         media={'reddit_video': {'fallback_url': 'https://v.redd.it/abc'}},
     )
     assert slurp.find_media_link(post) == 'https://v.redd.it/abc'
+
+
+class _FakeResponse:
+    def __init__(self, content):
+        self.content = content
+
+
+def test_save_failed_page_writes_html(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(
+        slurp.requests, 'get',
+        lambda url, timeout, headers: _FakeResponse(b'<html>mystery</html>'),
+    )
+    post = _FakePost('https://example.com/gallery/abc')
+    post.id = 'abc123'
+
+    target = slurp.save_failed_page(post)
+
+    saved = tmp_path / '_failed' / 'abc123.html'
+    assert saved.read_bytes() == b'<html>mystery</html>'
+    assert target == str(saved.relative_to(tmp_path))

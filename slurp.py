@@ -63,7 +63,8 @@ def _download_media(_post, _ctype):
 
     clength = 0
     try:
-        response = requests.get(_post.url, timeout=DEFAULT_TIMEOUT)
+        response = requests.get(_post.url, timeout=DEFAULT_TIMEOUT,
+                                headers={'User-Agent': USER_AGENT})
         if response:
             with open(target, 'wb') as fp:
                 for chunk in response:
@@ -99,6 +100,23 @@ def error_handler(post, response):
     return False
 
 
+def save_failed_page(post):
+    """ Save an unparseable HTML page locally for debugging """
+    failed_dir = '_failed'
+    try:
+        os.makedirs(failed_dir, exist_ok=True)
+        response = requests.get(post.url, timeout=DEFAULT_TIMEOUT,
+                                headers={'User-Agent': USER_AGENT})
+        target = os.path.join(failed_dir, '{}.html'.format(post.id))
+        with open(target, 'wb') as fp:
+            fp.write(response.content)
+        return target
+    except (requests.ConnectionError, requests.exceptions.ReadTimeout,
+            OSError) as error:
+        logging.error('Failed to save debug page for %s: %s', post.url, error)
+        return None
+
+
 def process(post):
     """ Process the given submission """
     # Check URL by requesting HEAD
@@ -106,7 +124,8 @@ def process(post):
         logging.debug('Missing URL.')
         return False
     try:
-        response = requests.head(post.url, timeout=DEFAULT_TIMEOUT)
+        response = requests.head(post.url, timeout=DEFAULT_TIMEOUT,
+                                 headers={'User-Agent': USER_AGENT})
     except (requests.ConnectionError,
             requests.exceptions.MissingSchema,
             requests.exceptions.ReadTimeout) as error:
@@ -130,6 +149,14 @@ def process(post):
         _url = find_media_link(post)
         logging.debug('[received %s; sifting through got %s]',
                       response.headers['Content-Type'], _url)
+        if _url is None:
+            target = save_failed_page(post)
+            if target:
+                logging.error('Could not find media link for %s; saved page to %s',
+                               post.url, target)
+            else:
+                logging.error('Could not find media link for %s', post.url)
+            return False
         if _url != post.url:
             post.url = _url
             return process(post)
